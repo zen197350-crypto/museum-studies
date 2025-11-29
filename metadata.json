@@ -1,0 +1,5 @@
+{
+  "name": "Museum Graph Explorer",
+  "description": "An interactive, force-directed graph visualization tool for exploring the connections between museum exhibits, physical concepts, and visitor interactions.",
+  "requestFramePermissions": []
+}
