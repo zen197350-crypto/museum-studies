@@ -16,6 +16,7 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src", "electron"],
+  "include": [".", "electron"],
+  "exclude": ["dist", "node_modules", "release"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }
