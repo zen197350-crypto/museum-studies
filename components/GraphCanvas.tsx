@@ -1,16 +1,24 @@
-
 import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { GraphData, NodeData, LinkData } from '../types';
 import { getSizeForNode, getEdgeColor, EDGE_LEGEND } from '../utils';
+import { LayoutType } from '../App';
 
 interface GraphCanvasProps {
   data: GraphData;
   onNodeClick: (node: NodeData) => void;
   selectedNodeId: string | null;
+  highlightedLinkType: string | null;
+  layout: LayoutType;
 }
 
-const GraphCanvas: React.FC<GraphCanvasProps> = ({ data, onNodeClick, selectedNodeId }) => {
+const GraphCanvas: React.FC<GraphCanvasProps> = ({ 
+    data, 
+    onNodeClick, 
+    selectedNodeId, 
+    highlightedLinkType,
+    layout 
+}) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const zoomRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
@@ -19,12 +27,17 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({ data, onNodeClick, selectedNo
 
   // Refs for D3 interactions to access latest state without re-binding events
   const selectedNodeIdRef = useRef(selectedNodeId);
+  const highlightedLinkTypeRef = useRef(highlightedLinkType);
   const highlightedNodesRef = useRef<Set<string>>(new Set());
 
   // Update refs when props change
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
   }, [selectedNodeId]);
+
+  useEffect(() => {
+      highlightedLinkTypeRef.current = highlightedLinkType;
+  }, [highlightedLinkType]);
 
   // Zoom range configuration
   const MIN_ZOOM = 0.1;
@@ -102,7 +115,8 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({ data, onNodeClick, selectedNo
     node.append("circle")
       .attr("r", d => getSizeForNode(d))
       .attr("fill", d => d.fillcolor || "#ccc")
-      .attr("stroke", "#fff")
+      // CONTRAST FIX: If node is white, give it a darker stroke. Otherwise white stroke.
+      .attr("stroke", d => (d.fillcolor === 'white' || d.fillcolor === '#ffffff') ? "#94a3b8" : "#fff")
       .attr("stroke-width", 1.5)
       .attr("class", "transition-all duration-300");
 
@@ -115,17 +129,14 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({ data, onNodeClick, selectedNo
       .attr("fill", "#333")
       .style("pointer-events", "none")
       .style("text-shadow", "1px 1px 0 #fff, -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff")
-      // CHANGE: Default opacity for small nodes is 0.5 (pale) instead of 0 (hidden)
       .style("opacity", d => (d.width && d.width > 2) ? 1 : 0.5); 
 
-    // Simulation
-    const simulation = d3.forceSimulation(data.nodes)
-      .force("link", d3.forceLink(data.links).id((d: any) => d.id).distance(120))
-      .force("charge", d3.forceManyBody().strength(-400))
-      .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collide", d3.forceCollide().radius((d: any) => getSizeForNode(d) + 15).iterations(2));
-    
+    // --- Simulation Setup ---
+    const simulation = d3.forceSimulation(data.nodes);
     simulationRef.current = simulation;
+    
+    // Apply layout-specific forces
+    applyLayoutForces(simulation, layout, width, height, data);
 
     simulation.on("tick", () => {
       link
@@ -144,25 +155,27 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({ data, onNodeClick, selectedNo
     });
 
     node.on("mouseover", function(event, d) {
-       // Always show full opacity on hover
        d3.select(this).select("text").transition().duration(200).style("opacity", 1);
        d3.select(this).select("circle").attr("stroke", "#3b82f6").attr("stroke-width", 3);
     });
     
     node.on("mouseout", function(event, d) {
-       // If currently selected node is active, don't dim it on mouseout
+       // Only reset if NOT the specifically selected node
        if (d.id !== selectedNodeIdRef.current) {
-         d3.select(this).select("circle").attr("stroke", "#fff").attr("stroke-width", 1.5);
+         const isWhite = d.fillcolor === 'white' || d.fillcolor === '#ffffff';
+         
+         d3.select(this).select("circle")
+            .attr("stroke", isWhite ? "#94a3b8" : "#fff")
+            .attr("stroke-width", 1.5);
          
          const text = d3.select(this).select("text");
          
-         // Logic to restore correct opacity based on mode
-         if (selectedNodeIdRef.current) {
-             // In selection mode, we rely on the group opacity for dimming.
-             // We keep text opacity at 1 so it's visible within the dimmed group.
+         // Keep opacity up if selected or if high tier, else fade
+         const isNodeHighlightedInLinkMode = highlightedLinkTypeRef.current && highlightedNodesRef.current.has(d.id);
+         
+         if (selectedNodeIdRef.current || isNodeHighlightedInLinkMode) {
              text.transition().duration(200).style("opacity", 1);
          } else {
-             // Default mode: revert to size-based opacity
              text.transition().duration(200).style("opacity", (d.width && d.width > 2) ? 1 : 0.5);
          }
        }
@@ -185,16 +198,153 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({ data, onNodeClick, selectedNo
       d.fy = null;
     }
 
-    // Assign refs for later use (highlighting)
     (window as any).graphNodes = node;
     (window as any).graphLinks = link;
 
     return () => {
       simulation.stop();
     };
-  }, [data]); // Run only when data changes
+  }, [data]); // Only recreate everything if DATA changes
 
-  // Separate effect for selection logic to avoid re-rendering D3 graph completely
+  // --- Auto-Center on Selection ---
+  useEffect(() => {
+    if (selectedNodeId && svgRef.current && zoomRef.current && containerRef.current) {
+        const node = data.nodes.find(n => n.id === selectedNodeId);
+        // Ensure node has coordinates (might be 0,0 initially but usually updated by sim tick)
+        if (node && typeof node.x === 'number' && typeof node.y === 'number') {
+            const svg = d3.select(svgRef.current);
+            const width = containerRef.current.clientWidth;
+            const height = containerRef.current.clientHeight;
+            
+            // Calculate transform to center the node
+            // translate(center) scale(k) translate(-node)
+            const targetScale = 1.3; // Zoom in slightly for focus
+            const transform = d3.zoomIdentity
+                .translate(width / 2, height / 2)
+                .scale(targetScale)
+                .translate(-node.x, -node.y);
+
+            svg.transition()
+                .duration(750) // Smooth animation
+                .call(zoomRef.current.transform, transform);
+            
+            setZoomLevel(targetScale);
+        }
+    }
+  }, [selectedNodeId, data]);
+
+  // Handle Layout Changes dynamically without destroying SVG
+  useEffect(() => {
+    if (simulationRef.current && containerRef.current) {
+        const width = containerRef.current.clientWidth;
+        const height = containerRef.current.clientHeight;
+        const simulation = simulationRef.current;
+        
+        // Remove old forces
+        simulation.force("link", null);
+        simulation.force("charge", null);
+        simulation.force("center", null);
+        simulation.force("collide", null);
+        simulation.force("radial", null);
+        simulation.force("x", null);
+        simulation.force("y", null);
+
+        // Apply new forces
+        applyLayoutForces(simulation, layout, width, height, data);
+        
+        // Re-heat simulation
+        simulation.alpha(1).restart();
+    }
+  }, [layout, data]); // Trigger on layout change
+
+  // --- Layout Logic ---
+  const applyLayoutForces = (simulation: d3.Simulation<NodeData, LinkData>, mode: LayoutType, w: number, h: number, graphData: GraphData) => {
+    // Common forces
+    const linkForce = d3.forceLink<NodeData, LinkData>(graphData.links).id((d: any) => d.id);
+    simulation.force("link", linkForce);
+    simulation.force("collide", d3.forceCollide().radius((d: any) => getSizeForNode(d) + 5).iterations(2));
+
+    if (mode === 'force') {
+        // STANDARD FORCE LAYOUT
+        linkForce.distance(100);
+        simulation.force("charge", d3.forceManyBody().strength(-300));
+        simulation.force("center", d3.forceCenter(w / 2, h / 2));
+    
+    } else if (mode === 'radial') {
+        // RADIAL / TIERED LAYOUT
+        simulation.force("charge", d3.forceManyBody().strength(-100));
+        linkForce.strength(0.1); 
+        
+        simulation.force("radial", d3.forceRadial((d: any) => {
+            const size = getSizeForNode(d);
+            if (size > 40) return 0;       // Center
+            if (size > 30) return 250;     // Inner Ring
+            if (size > 20) return 500;     // Middle Ring
+            return 800;                    // Outer Ring
+        }, w / 2, h / 2).strength(0.8));
+
+    } else if (mode === 'circuit') {
+        // CIRCUIT LAYOUT (Simulated as high-repulsion schematic view)
+        // High repulsion to spread nodes apart like a diagram
+        simulation.force("charge", d3.forceManyBody().strength(-1200));
+        simulation.force("center", d3.forceCenter(w / 2, h / 2).strength(0.05));
+        // Stiff, longer links
+        linkForce.distance(150).strength(0.8);
+        simulation.force("collide", d3.forceCollide().radius((d: any) => getSizeForNode(d) * 1.5));
+
+    } else if (mode === 'subset') {
+        // SUBSET LAYOUT (Clustered by Color/Category)
+        simulation.force("charge", d3.forceManyBody().strength(-100));
+        linkForce.strength(0.05); // Weak links to allow grouping
+
+        // Identify Groups
+        const groups = Array.from(new Set(graphData.nodes.map(d => d.fillcolor || '#ccc')));
+        const groupCount = groups.length;
+        const radius = Math.min(w, h) * 0.35;
+        
+        // Calculate Center for each Group in a circle
+        const groupCenters: Record<string, {x: number, y: number}> = {};
+        groups.forEach((color, i) => {
+            const angle = (i / groupCount) * 2 * Math.PI;
+            groupCenters[color] = {
+                x: w/2 + radius * Math.cos(angle),
+                y: h/2 + radius * Math.sin(angle)
+            };
+        });
+
+        // Pull nodes to their group center
+        simulation.force("x", d3.forceX((d: any) => {
+            const color = d.fillcolor || '#ccc';
+            return groupCenters[color]?.x || w/2;
+        }).strength(0.5));
+
+        simulation.force("y", d3.forceY((d: any) => {
+            const color = d.fillcolor || '#ccc';
+            return groupCenters[color]?.y || h/2;
+        }).strength(0.5));
+
+    } else if (mode === 'grid') {
+        // GRID LAYOUT
+        const n = graphData.nodes.length;
+        const cols = Math.ceil(Math.sqrt(n * 1.5));
+        const scale = 120;
+        
+        simulation.force("charge", d3.forceManyBody().strength(-50));
+        linkForce.strength(0.01);
+        
+        simulation.force("x", d3.forceX((d: any, i: number) => {
+            const col = i % cols;
+            return (w / 2) - ((cols * scale) / 2) + (col * scale);
+        }).strength(1));
+        
+        simulation.force("y", d3.forceY((d: any, i: number) => {
+            const row = Math.floor(i / cols);
+            return (h / 2) - ((n / cols * scale) / 2) + (row * scale);
+        }).strength(1));
+    }
+  };
+
+  // --- Visual Highlighting Logic ---
   useEffect(() => {
     if (!(window as any).graphNodes) return;
     
@@ -202,6 +352,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({ data, onNodeClick, selectedNo
     const link = (window as any).graphLinks;
 
     if (selectedNodeId) {
+        // 1. NODE SELECTION MODE
         // Calculate neighbors
         const linkedIds = new Set<string>();
         linkedIds.add(selectedNodeId);
@@ -212,38 +363,61 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({ data, onNodeClick, selectedNo
             if (t === selectedNodeId) linkedIds.add(s as string);
         });
         
-        // Update ref for mouse handlers
         highlightedNodesRef.current = linkedIds;
 
-        // Dim inactive nodes (Group Opacity)
-        // CHANGE: Inactive nodes set to 0.35 (visible) instead of 0.1 (hidden)
-        node.transition().duration(300).style('opacity', (d: any) => linkedIds.has(d.id) ? 1 : 0.35);
+        node.transition().duration(300).style('opacity', (d: any) => linkedIds.has(d.id) ? 1 : 0.15);
         
-        // Highlight connections
         link.transition().duration(300)
             .style('opacity', (d: any) => (d.source.id === selectedNodeId || d.target.id === selectedNodeId) ? 1 : 0.05)
             .attr('stroke', (d: any) => (d.source.id === selectedNodeId || d.target.id === selectedNodeId) ? getEdgeColor(d.label) : "#e5e7eb");
 
-        // Ensure text is visible (inherited from group opacity)
-        // CHANGE: Force text opacity to 1 so it shows up even in dimmed groups
-        node.select("text").style("opacity", 1);
-        
+        node.select("text").style("opacity", (d: any) => linkedIds.has(d.id) ? 1 : 0);
         node.filter((d: any) => d.id === selectedNodeId).select("circle").attr("stroke", "#3b82f6").attr("stroke-width", 4);
 
-    } else {
-        highlightedNodesRef.current = new Set();
+    } else if (highlightedLinkType) {
+        // 2. LINK TYPE HIGHLIGHT MODE
+        const relevantNodeIds = new Set<string>();
+        
+        data.links.forEach(l => {
+            if (l.label === highlightedLinkType) {
+                const s = typeof l.source === 'object' ? (l.source as NodeData).id : l.source;
+                const t = typeof l.target === 'object' ? (l.target as NodeData).id : l.target;
+                relevantNodeIds.add(s as string);
+                relevantNodeIds.add(t as string);
+            }
+        });
 
-        // Reset all to full opacity
+        highlightedNodesRef.current = relevantNodeIds;
+
+        // Dim unconnected nodes significantly
+        node.transition().duration(300).style('opacity', (d: any) => relevantNodeIds.has(d.id) ? 1 : 0.15);
+        
+        // Highlight only matching links
+        link.transition().duration(300)
+            .style('opacity', (d: any) => d.label === highlightedLinkType ? 1 : 0.05)
+            .attr('stroke', (d: any) => d.label === highlightedLinkType ? getEdgeColor(d.label) : "#e5e7eb");
+
+        // Show labels for relevant nodes
+        node.select("text").style("opacity", (d: any) => relevantNodeIds.has(d.id) ? 1 : 0);
+        
+        // CONTRAST FIX for Highlight Mode: reset unconnected nodes to correct border
+        node.select("circle")
+            .attr("stroke", (d: any) => (d.fillcolor === 'white' || d.fillcolor === '#ffffff') ? "#94a3b8" : "#fff")
+            .attr("stroke-width", 1.5); 
+
+    } else {
+        // 3. DEFAULT MODE
+        highlightedNodesRef.current = new Set();
         node.transition().duration(300).style('opacity', 1);
         link.transition().duration(300).style('opacity', 0.7).attr('stroke', (d: any) => getEdgeColor(d.label));
-        
-        // Reset text visibility based on size
-        // CHANGE: Small nodes text opacity 0.5 instead of 0
         node.select("text").style("opacity", (d: any) => (d.width && d.width > 2) ? 1 : 0.5);
         
-        node.select("circle").attr("stroke", "#fff").attr("stroke-width", 1.5);
+        // CONTRAST FIX for Default Mode reset
+        node.select("circle")
+            .attr("stroke", (d: any) => (d.fillcolor === 'white' || d.fillcolor === '#ffffff') ? "#94a3b8" : "#fff")
+            .attr("stroke-width", 1.5);
     }
-  }, [selectedNodeId, data]);
+  }, [selectedNodeId, highlightedLinkType, data]);
 
 
   const handleZoomChange = (e: React.ChangeEvent<HTMLInputElement>) => {

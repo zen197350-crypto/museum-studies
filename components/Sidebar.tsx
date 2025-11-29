@@ -1,15 +1,31 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { NodeData, LinkData } from '../types';
+import { LayoutType } from '../App';
 
 interface SidebarProps {
   nodes: NodeData[];
   links: LinkData[];
   selectedNodeId: string | null;
   onNodeSelect: (node: NodeData | null) => void;
+  currentLayout: LayoutType;
+  onLayoutChange: (layout: LayoutType) => void;
+  highlightedLinkType: string | null;
+  onHighlightLinkType: (type: string | null) => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ nodes, links, selectedNodeId, onNodeSelect }) => {
-  const [searchTerm, setSearchTerm] = useState('');
+const Sidebar: React.FC<SidebarProps> = ({ 
+  nodes, 
+  links, 
+  selectedNodeId, 
+  onNodeSelect,
+  currentLayout,
+  onLayoutChange,
+  highlightedLinkType,
+  onHighlightLinkType
+}) => {
+  const [nodeSearchTerm, setNodeSearchTerm] = useState('');
+  const [linkSearchTerm, setLinkSearchTerm] = useState('');
+  const [activeTab, setActiveTab] = useState<'nodes' | 'links'>('nodes');
   const [isVisible, setIsVisible] = useState(true);
 
   // Auto-open sidebar when a node is selected via graph
@@ -23,6 +39,45 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, links, selectedNodeId, onNodeS
     nodes.find(n => n.id === selectedNodeId), 
   [nodes, selectedNodeId]);
 
+  // --- Node Filtering ---
+  const filteredNodes = useMemo(() => {
+    if (!nodeSearchTerm) return [];
+    return nodes.filter(n => n.label.toLowerCase().includes(nodeSearchTerm.toLowerCase())).slice(0, 10);
+  }, [nodes, nodeSearchTerm]);
+
+  // --- Link Statistics & Sorting ---
+  const sortedLinkTypes = useMemo(() => {
+    // Count frequency
+    const counts: Record<string, number> = {};
+    links.forEach(l => {
+        if (l.label) {
+            counts[l.label] = (counts[l.label] || 0) + 1;
+        }
+    });
+
+    // Sort by count descending, then alphabetical
+    return Object.keys(counts).sort((a, b) => {
+        const diff = counts[b] - counts[a];
+        if (diff !== 0) return diff;
+        return a.localeCompare(b);
+    }).map(type => ({ type, count: counts[type] }));
+  }, [links]);
+
+  // --- Link Filtering for List View ---
+  const filteredLinks = useMemo(() => {
+    const search = linkSearchTerm.toLowerCase();
+    const typeFilter = highlightedLinkType;
+
+    if (!search && !typeFilter) return [];
+
+    return links.filter(l => {
+        const matchesSearch = !search || l.label.toLowerCase().includes(search);
+        const matchesType = !typeFilter || l.label === typeFilter;
+        return matchesSearch && matchesType;
+    }).slice(0, 50); // Limit results for performance
+  }, [links, linkSearchTerm, highlightedLinkType]);
+
+  // --- Node Details Neighbors ---
   const neighbors = useMemo(() => {
     if (!selectedNodeId) return [];
     return links.filter(link => {
@@ -43,10 +98,15 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, links, selectedNodeId, onNodeS
     });
   }, [links, nodes, selectedNodeId]);
 
-  const filteredNodes = useMemo(() => {
-    if (!searchTerm) return [];
-    return nodes.filter(n => n.label.toLowerCase().includes(searchTerm.toLowerCase())).slice(0, 10);
-  }, [nodes, searchTerm]);
+  const getNodeLabel = (nodeOrId: string | NodeData) => {
+      if (typeof nodeOrId === 'object') return nodeOrId.label;
+      const found = nodes.find(n => n.id === nodeOrId);
+      return found ? found.label : nodeOrId;
+  };
+
+  const getNodeId = (nodeOrId: string | NodeData) => {
+      return typeof nodeOrId === 'object' ? nodeOrId.id : nodeOrId;
+  };
 
   // Collapsed State: Show floating open button
   if (!isVisible) {
@@ -66,8 +126,8 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, links, selectedNodeId, onNodeS
   return (
     <div className="absolute top-0 right-0 h-full w-80 bg-white shadow-xl z-10 flex flex-col border-l border-gray-200 transition-transform duration-300">
       
-      {/* Header / Search */}
-      <div className="p-4 bg-slate-100 border-b border-gray-200 relative">
+      {/* Header */}
+      <div className="p-4 bg-slate-100 border-b border-gray-200">
         <div className="flex justify-between items-center mb-4">
             <h1 className="text-xl font-bold text-slate-800">Museum Explorer</h1>
             <button 
@@ -80,40 +140,98 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, links, selectedNodeId, onNodeS
                 </svg>
             </button>
         </div>
+
+        {/* Layout Selector */}
+        <div className="mb-4">
+            <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Компоновка графа</label>
+            <select 
+                value={currentLayout}
+                onChange={(e) => onLayoutChange(e.target.value as LayoutType)}
+                className="w-full p-2 text-sm bg-white border border-gray-300 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+            >
+                <option value="force">Стандартная (Force)</option>
+                <option value="radial">Радиальная (Radial)</option>
+                <option value="circuit">Схема (Circuit)</option>
+                <option value="subset">Группировка (Subset)</option>
+                <option value="grid">Сетка (Grid)</option>
+            </select>
+        </div>
         
+        {/* Tabs */}
+        <div className="flex border-b border-gray-300 mb-2">
+            <button 
+                className={`flex-1 pb-2 text-sm font-medium ${activeTab === 'nodes' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'}`}
+                onClick={() => { setActiveTab('nodes'); onHighlightLinkType(null); setLinkSearchTerm(''); }}
+            >
+                Узлы
+            </button>
+            <button 
+                className={`flex-1 pb-2 text-sm font-medium ${activeTab === 'links' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'}`}
+                onClick={() => { setActiveTab('links'); setNodeSearchTerm(''); onNodeSelect(null); }}
+            >
+                Связи
+            </button>
+        </div>
+
+        {/* Search Inputs based on Tab */}
         <div className="relative">
-          <input
-            type="text"
-            placeholder="Search exhibits..."
-            className="w-full p-2 border border-gray-300 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-          />
-          {searchTerm && (
-              <div className="absolute top-full left-0 w-full bg-white shadow-lg border border-gray-200 rounded mt-1 max-h-60 overflow-y-auto z-20">
-                  {filteredNodes.map(node => (
-                      <div 
-                        key={node.id} 
-                        className="p-2 hover:bg-blue-50 cursor-pointer text-sm text-gray-700"
-                        onClick={() => {
-                            onNodeSelect(node);
-                            setSearchTerm('');
-                        }}
-                      >
-                          {node.label}
-                      </div>
-                  ))}
-                  {filteredNodes.length === 0 && (
-                      <div className="p-2 text-gray-500 text-sm">No results found</div>
-                  )}
+          {activeTab === 'nodes' ? (
+              <>
+                <input
+                    type="text"
+                    placeholder="Поиск экспонатов..."
+                    className="w-full p-2 border border-gray-300 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    value={nodeSearchTerm}
+                    onChange={(e) => setNodeSearchTerm(e.target.value)}
+                />
+                 {nodeSearchTerm && !selectedNode && (
+                    <div className="absolute top-full left-0 w-full bg-white shadow-lg border border-gray-200 rounded mt-1 max-h-60 overflow-y-auto z-20">
+                        {filteredNodes.map(node => (
+                            <div 
+                                key={node.id} 
+                                className="p-2 hover:bg-blue-50 cursor-pointer text-sm text-gray-700"
+                                onClick={() => {
+                                    onNodeSelect(node);
+                                    setNodeSearchTerm('');
+                                }}
+                            >
+                                {node.label}
+                            </div>
+                        ))}
+                        {filteredNodes.length === 0 && (
+                            <div className="p-2 text-gray-500 text-sm">Ничего не найдено</div>
+                        )}
+                    </div>
+                 )}
+              </>
+          ) : (
+              <div className="space-y-2">
+                 <input
+                    type="text"
+                    placeholder="Поиск по названию связи..."
+                    className="w-full p-2 text-sm border border-gray-300 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    value={linkSearchTerm}
+                    onChange={(e) => setLinkSearchTerm(e.target.value)}
+                />
+                <select 
+                    value={highlightedLinkType || ""}
+                    onChange={(e) => onHighlightLinkType(e.target.value || null)}
+                    className="w-full p-2 text-sm bg-white border border-gray-300 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                >
+                    <option value="">Все типы связей</option>
+                    {sortedLinkTypes.map(({ type, count }) => (
+                        <option key={type} value={type}>{type} ({count})</option>
+                    ))}
+                </select>
               </div>
           )}
         </div>
       </div>
 
-      {/* Content */}
+      {/* Content Area */}
       <div className="flex-1 overflow-y-auto p-4">
         {selectedNode ? (
+          // NODE DETAILS VIEW
           <div className="space-y-6">
             <div className="pb-4 border-b border-gray-100">
                 <button 
@@ -121,20 +239,19 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, links, selectedNodeId, onNodeS
                     className="text-xs text-blue-500 hover:text-blue-700 mb-2 flex items-center"
                 >
                     <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
-                    Back to full view
+                    Назад к графу
                 </button>
                 <h2 className="text-2xl font-bold text-gray-800 break-words leading-tight">{selectedNode.label}</h2>
                 <div className="mt-2 flex gap-2 flex-wrap">
                      {selectedNode.width && selectedNode.width > 3 && (
                          <span className="px-2 py-1 bg-purple-100 text-purple-800 text-xs rounded-full font-semibold">Tier 1 Exhibit</span>
                      )}
-                     <span className="px-2 py-1 bg-gray-100 text-gray-600 text-xs rounded-full font-mono break-all">ID: {selectedNode.id}</span>
                 </div>
             </div>
 
             {/* Relations */}
             <div>
-                <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Connections ({neighbors.length})</h3>
+                <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Связи ({neighbors.length})</h3>
                 <div className="space-y-3">
                     {neighbors.map((rel, idx) => (
                         <div key={idx} className="flex items-start group">
@@ -153,19 +270,60 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, links, selectedNodeId, onNodeS
                 </div>
             </div>
           </div>
+        ) : activeTab === 'links' && (linkSearchTerm || highlightedLinkType) ? (
+            // LINK SEARCH RESULTS VIEW
+            <div>
+                 <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">
+                     Найдено связей: {filteredLinks.length}
+                     {filteredLinks.length === 50 && "+"}
+                 </h3>
+                 <div className="space-y-2">
+                     {filteredLinks.map((link, i) => {
+                         const sourceLabel = getNodeLabel(link.source);
+                         const targetLabel = getNodeLabel(link.target);
+                         
+                         return (
+                            <div key={i} className="p-3 bg-gray-50 rounded border border-gray-100 hover:border-blue-300 transition-colors text-sm">
+                                <div className="text-xs text-blue-600 font-bold mb-1">{link.label}</div>
+                                <div className="flex items-center gap-2 text-gray-700">
+                                    <span 
+                                        className="cursor-pointer hover:underline"
+                                        onClick={() => {
+                                            const node = nodes.find(n => n.id === getNodeId(link.source));
+                                            onNodeSelect(node || null);
+                                        }}
+                                    >
+                                        {sourceLabel}
+                                    </span>
+                                    <span className="text-gray-400">→</span>
+                                    <span 
+                                        className="cursor-pointer hover:underline"
+                                        onClick={() => {
+                                            const node = nodes.find(n => n.id === getNodeId(link.target));
+                                            onNodeSelect(node || null);
+                                        }}
+                                    >
+                                        {targetLabel}
+                                    </span>
+                                </div>
+                            </div>
+                         )
+                     })}
+                 </div>
+            </div>
         ) : (
+          // DEFAULT EMPTY STATE
           <div className="text-center text-gray-500 mt-10">
             <svg className="w-16 h-16 mx-auto mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <p>Select a node on the graph or search to view details.</p>
+            <p>Выберите узел на графе или воспользуйтесь фильтром связей.</p>
             <div className="mt-8 text-left text-sm text-gray-400 space-y-2">
-                <p><strong>Tips:</strong></p>
+                <p><strong>Подсказки:</strong></p>
                 <ul className="list-disc pl-5 space-y-1">
-                    <li>Scroll to zoom in/out</li>
-                    <li>Drag background to pan</li>
-                    <li>Drag nodes to rearrange</li>
-                    <li>Click a node to focus relations</li>
+                    <li>Скролл для масштаба</li>
+                    <li>Перетаскивание фона для панорамирования</li>
+                    <li>Перетаскивание узлов для изменения структуры</li>
                 </ul>
             </div>
           </div>
@@ -174,7 +332,7 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, links, selectedNodeId, onNodeS
       
       {/* Footer */}
       <div className="p-2 border-t border-gray-200 text-center text-xs text-gray-400 bg-gray-50">
-        Total Nodes: {nodes.length} | Links: {links.length}
+        Узлов: {nodes.length} | Связей: {links.length}
       </div>
     </div>
   );
